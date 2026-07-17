@@ -1,0 +1,17 @@
+# Copyright (c) 2026 Mattia Cabrini
+# SPDX-License-Identifier: MIT
+
+# ---------------------------------------------------------------------------
+# nel-media-watch -- GLOBAL configuration.
+#
+# Plain POSIX shell, sourced ('.') by the scripts.
+#
+# The local (per-target) configurations are NOT included here: they live
+# as individual '*.conf' files in the conf.d/ directory next to this
+# file, and exec.sh sources them one at a time.  Adding a target =
+# creating a file there; removing it = deleting that file.
+# ---------------------------------------------------------------------------
+
+# Absolute path of the directory holding the result cache (one file per
+# xxh128 content hash, sharded over 10 directory levels).
+CACHE_DIRECTORY="/var/db/nel-media-watch/cache"
