@@ -15,7 +15,8 @@
 #
 # Exit codes:
 #     0   job launched (or nothing to run)
-#     1   input stream closed, tool not installed, or daemon(8) failed
+#     1   input stream closed, tool not installed or outdated, or
+#         daemon(8) failed
 # ---------------------------------------------------------------------------
 
 set -u
@@ -26,6 +27,17 @@ if [ ! -x "$LIBEXEC_DIRECTORY/exec.sh" ]; then
     echo "ERROR: $LIBEXEC_DIRECTORY/exec.sh not found: run 'make install' first" >&2
     exit 1
 fi
+
+# The detached job runs the INSTALLED runtime: refuse to launch it when
+# it differs from the repository, otherwise the job would silently run
+# outdated code.
+SOURCE_DIRECTORY=$(cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
+for SCRIPT_NAME in $RUNTIME_SCRIPTS; do
+    if ! cmp -s "$SOURCE_DIRECTORY/libexec/$SCRIPT_NAME" "$LIBEXEC_DIRECTORY/$SCRIPT_NAME"; then
+        echo "ERROR: installed '$SCRIPT_NAME' differs from the repository: run 'make install' first" >&2
+        exit 1
+    fi
+done
 
 list_configurations
 if [ "$CONFIGURATION_COUNT" -eq 0 ]; then
