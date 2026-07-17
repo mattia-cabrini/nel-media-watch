@@ -5,10 +5,11 @@
 # ---------------------------------------------------------------------------
 # config.sh -- interactively add a target configuration (run as root).
 #
-# Asks for the file name and the four parameters (TARGET_DIRECTORY,
-# FILTER, CASE as a 1/2 menu, REGISTRY), validates them, and writes
-# conf.d/<name>.conf.  The prompts and validations are shared with
-# reconfig.sh (see common.sh).
+# Asks for the file name and the five parameters (RUN_AS, then
+# TARGET_DIRECTORY -- validated with the RUN_AS identity, which matters
+# on NFS where root is squashed -- FILTER, CASE as a 1/2 menu,
+# REGISTRY), validates them, and writes conf.d/<name>.conf.  The
+# prompts and validations are shared with reconfig.sh (see common.sh).
 #
 # Exit codes:
 #     0   configuration written
@@ -38,8 +39,9 @@ while :; do
     break
 done
 
-# Empty starting values: every prompt requires an explicit answer.
-TARGET_DIRECTORY=; FILTER=; CASE=; REGISTRY=
+# Empty starting values: every prompt requires an explicit answer
+# (except RUN_AS, whose empty answer means root).
+TARGET_DIRECTORY=; FILTER=; CASE=; REGISTRY=; RUN_AS=
 prompt_all_parameters
 
 write_configuration "$CONF_D_DIRECTORY/$CONFIGURATION_NAME.conf"

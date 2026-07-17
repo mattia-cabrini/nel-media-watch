@@ -22,7 +22,7 @@ ETC_DIRECTORY="$PREFIX/etc/nel-media-watch"
 CONF_D_DIRECTORY="$ETC_DIRECTORY/conf.d"
 GLOBAL_CONF="$ETC_DIRECTORY/nel-media-watch.conf"
 
-RUNTIME_SCRIPTS="helpers.sh exec.sh exec_check.sh exec_dir.sh check_media_state.sh check_media_state_c.sh"
+RUNTIME_SCRIPTS="helpers.sh scan.sh exec.sh exec_check.sh exec_dir.sh check_media_state.sh check_media_state_c.sh"
 
 # timestamp: print the current time as {yyyymmdd}h{HHMMSS}; used to name
 # backup files.
@@ -66,6 +66,48 @@ select_configuration() {
 
 # --- Parameter prompts -----------------------------------------------------
 
+# directory_exists_as <user> <path>: 'test -d' with the identity that
+# will actually scan the target.  Needed for NFS targets where root is
+# squashed to nobody: root may not even see a directory that the RUN_AS
+# user can.  The path travels through the environment so the su command
+# string stays constant (same technique as run_as in libexec/helpers.sh;
+# sudo is not installed on the host).
+directory_exists_as() {
+    if [ "$1" = "root" ]; then
+        [ -d "$2" ]
+        return
+    fi
+    NEL_MEDIA_WATCH_CHECK_DIRECTORY="$2"
+    export NEL_MEDIA_WATCH_CHECK_DIRECTORY
+    su -m "$1" -c 'test -d "$NEL_MEDIA_WATCH_CHECK_DIRECTORY"'
+}
+
+# Asked FIRST among the parameters: the TARGET_DIRECTORY validation
+# below needs this identity.  An empty answer means root when there is
+# no current value (config), or keeps the current one (reconfig).
+prompt_run_as() {
+    while :; do
+        if [ -n "$RUN_AS" ]; then
+            printf 'RUN_AS [%s]: ' "$RUN_AS"
+        else
+            printf 'RUN_AS (user that scans and analyses this target; empty = root): '
+        fi
+        read -r _answer || exit 1
+        if [ -z "$_answer" ]; then
+            [ -n "$RUN_AS" ] || RUN_AS="root"
+            return
+        fi
+        case "$_answer" in
+            *"'"*) echo "  Single quotes are not allowed."; continue ;;
+        esac
+        if id "$_answer" >/dev/null 2>&1; then
+            RUN_AS="$_answer"
+            return
+        fi
+        echo "  Unknown user."
+    done
+}
+
 prompt_target_directory() {
     while :; do
         if [ -n "$TARGET_DIRECTORY" ]; then
@@ -84,11 +126,11 @@ prompt_target_directory() {
             /*) ;;
             *)  echo "  Must be an absolute path."; continue ;;
         esac
-        if [ -d "$_answer" ]; then
+        if directory_exists_as "$RUN_AS" "$_answer"; then
             TARGET_DIRECTORY="$_answer"
             return
         fi
-        echo "  Does not exist or is not a directory."
+        echo "  Does not exist or is not a directory (checked as user '$RUN_AS')."
     done
 }
 
@@ -169,15 +211,17 @@ prompt_registry() {
     done
 }
 
-# Ask the four parameters in order (used by config.sh and reconfig.sh).
+# Ask the five parameters in order (used by config.sh and reconfig.sh).
+# RUN_AS comes first: the directory validation depends on it.
 prompt_all_parameters() {
+    prompt_run_as
     prompt_target_directory
     prompt_filter
     prompt_case
     prompt_registry
 }
 
-# Write the four variables to the configuration file $1.
+# Write the five variables to the configuration file $1.
 write_configuration() {
     {
         echo "# nel-media-watch local (per-target) configuration."
@@ -185,6 +229,7 @@ write_configuration() {
         printf "FILTER='%s'\n" "$FILTER"
         printf "CASE='%s'\n" "$CASE"
         printf "REGISTRY='%s'\n" "$REGISTRY"
+        printf "RUN_AS='%s'\n" "$RUN_AS"
     } > "$1"
     echo "==> Wrote $1"
 }

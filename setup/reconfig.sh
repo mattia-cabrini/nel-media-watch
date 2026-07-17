@@ -6,7 +6,7 @@
 # reconfig.sh -- edit an existing target configuration (run as root).
 #
 # Lists the configurations, selects one by numeric index, then re-asks
-# the four parameters in "no change on empty" mode: the current value is
+# the five parameters in "no change on empty" mode: the current value is
 # shown in [brackets] and an empty answer keeps it.  Only NEW values are
 # validated.  The prompts and validations are shared with config.sh
 # (see common.sh).
@@ -27,8 +27,10 @@ if [ "$CONFIGURATION_COUNT" -eq 0 ]; then
 fi
 select_configuration "edit"
 
-# Current values as starting point: every prompt keeps them on empty input.
-TARGET_DIRECTORY=; FILTER=; CASE=; REGISTRY=
+# Current values as starting point: every prompt keeps them on empty
+# input.  A configuration written before RUN_AS existed leaves it empty,
+# and the RUN_AS prompt then defaults it to root.
+TARGET_DIRECTORY=; FILTER=; CASE=; REGISTRY=; RUN_AS=
 . "$SELECTED_CONFIGURATION"
 
 echo "Editing $SELECTED_CONFIGURATION (an empty answer keeps the current value)."

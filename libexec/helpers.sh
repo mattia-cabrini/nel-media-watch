@@ -19,6 +19,32 @@ watch_log() {
     logger -t "$SYSLOG_TAG" "$@"
 }
 
+# run_as <user> <script> [argument]: run one of this tool's sh scripts
+# as the given user.  'root' runs it directly; anyone else goes through
+# su(1) -- sudo is not installed on the host, and root needs no password
+# to su.  This is how NFS targets are read: root is squashed to nobody
+# there, the configured RUN_AS user is not.
+#
+# '-m' keeps the environment and uses the CALLER's shell, so RUN_AS
+# users without a login shell work too.  The script path and the
+# optional argument travel through the ENVIRONMENT: the su command
+# string is constant, no data is ever quoted into it, and it parses the
+# same whether root's shell is sh or csh.
+run_as() {
+    _user="$1"
+    shift
+
+    if [ "$_user" = "root" ]; then
+        sh "$@"
+        return
+    fi
+
+    NEL_MEDIA_WATCH_COMMAND="$1"
+    NEL_MEDIA_WATCH_ARGUMENT="${2:-}"
+    export NEL_MEDIA_WATCH_COMMAND NEL_MEDIA_WATCH_ARGUMENT
+    su -m "$_user" -c 'sh "$NEL_MEDIA_WATCH_COMMAND" "$NEL_MEDIA_WATCH_ARGUMENT"'
+}
+
 # hash_file <path>: print the xxh128 digest of the file content
 # (32 lowercase hex characters).
 hash_file() {

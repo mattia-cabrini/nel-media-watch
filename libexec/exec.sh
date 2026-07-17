@@ -8,28 +8,33 @@
 # Flow of a run:
 #   0. take the global lock (lockf); if busy, log and leave at once;
 #   1. load the global configuration (CACHE_DIRECTORY);
-#   2. SNAPSHOT: per target, list the files (find | grep FILTER) and hash
-#      each one with xxh128sum, producing one "PH" file per target plus a
-#      general one with everything.  Lists and hashes are crystallised
-#      here and used unchanged for the whole run;
-#   3. GENERAL PASS: feed the general PH file, de-duplicated by hash, to
-#      exec_check.sh -- every content never seen before is analysed and
-#      cached in this single batch;
-#   4. REGISTRIES: per target, exec_dir.sh builds the registry from the
-#      target's PH lines on stdin (pure cache reads, nothing re-analysed);
-#   5. log the total duration.
+#   2. SNAPSHOT: per target, scan.sh lists and hashes the files
+#      (find | grep FILTER | xxh128sum) into one "PH" file per target.
+#      Lists and hashes are crystallised here and used unchanged for
+#      the whole run;
+#   3. per target: feed its PH lines, de-duplicated by hash, to
+#      exec_check.sh (content never seen before is analysed and
+#      cached), then let exec_dir.sh build the registry (pure cache
+#      reads).  Content shared across targets is analysed only once:
+#      the first batch caches it, the later ones hit the cache;
+#   4. log the total duration.
 #
-# The PH line format and the shared helpers live in helpers.sh.
+# Identity model (NFS root-squash support): every operation that READS
+# the media files -- the scan and the ffprobe/ffmpeg analysis -- runs as
+# the target's RUN_AS user through run_as/su(1) (sudo is not installed).
+# Everything that WRITES -- cache entries and registries -- always runs
+# as root, no matter what RUN_AS says.
 #
 # Locking: lockf(1) ties the lock to a file descriptor, which the kernel
 # releases when the process dies -- hard power loss included.  No stale
 # locks can exist, so no cleanup logic exists either.
 #
-# Concurrency: by explicit project decision the heavy stages (hashing and
-# the general analysis batch) use (available cores - 1) parallel workers,
-# superseding the strictly sequential rule of the original specification.
-# Each ffmpeg decode is single-threaded (see check_media_state.sh), so
-# one core is always left free for the other services on the machine.
+# Concurrency: by explicit project decision the heavy stages (hashing
+# and the analysis batches) use (available cores - 1) parallel workers,
+# superseding the strictly sequential rule of the original
+# specification.  Each ffmpeg decode is single-threaded (see
+# check_media_state.sh), so one core is always left free for the other
+# services on the machine.
 #
 # Paths are assumed not to contain newlines (the scan is line-oriented).
 #
@@ -43,6 +48,11 @@ set -u
 
 SELF_DIRECTORY=$(cd -- "$(dirname -- "$0")" && pwd) || exit 1
 . "$SELF_DIRECTORY/helpers.sh"
+
+# cron(8) gives crontab entries a bare PATH without /usr/local, where
+# xxh128sum, ffmpeg and ffprobe live: make them always reachable.
+PATH="/usr/local/sbin:/usr/local/bin:$PATH"
+export PATH
 
 # Overridable from the environment (handy for testing).
 LOCK_FILE="${NEL_MEDIA_WATCH_LOCK:-/var/run/nel-media-watch.lock}"
@@ -100,26 +110,17 @@ export NEL_MEDIA_WATCH_JOBS
 WORK_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/nel-media-watch.XXXXXX") || exit 1
 trap 'rm -rf "$WORK_DIRECTORY"' EXIT
 
-# Target PH files are named "ph.<target>", so the general file can never
-# collide with a target name.
-GENERAL_PH_FILE="$WORK_DIRECTORY/general"
-: > "$GENERAL_PH_FILE"
-
-# --- 2. Snapshot: list and hash every target ---------------------------------------
+# --- 2. Snapshot: list and hash every target (as its RUN_AS user) ----------------
 
 for LOCAL_CONF in "$CONF_D_DIRECTORY"/*.conf; do
     [ -e "$LOCAL_CONF" ] || continue
     TARGET_NAME=$(basename -- "$LOCAL_CONF" .conf)
 
-    # Reset, then source: values cannot leak between targets.
-    TARGET_DIRECTORY=; FILTER=; CASE=; REGISTRY=
+    # Reset, then source: values cannot leak between targets.  RUN_AS
+    # defaults to root for configurations written before it existed.
+    TARGET_DIRECTORY=; FILTER=; CASE=; REGISTRY=; RUN_AS=
     . "$LOCAL_CONF"
-
-    # A target that vanished is logged and skipped, never fatal.
-    if [ ! -d "$TARGET_DIRECTORY" ]; then
-        watch_log "Target '$TARGET_NAME': '$TARGET_DIRECTORY' is not a directory, target skipped"
-        continue
-    fi
+    [ -n "$RUN_AS" ] || RUN_AS=root
 
     # CASE selects the grep flavour (kept as a single token on purpose).
     case "$CASE" in
@@ -127,38 +128,28 @@ for LOCAL_CONF in "$CONF_D_DIRECTORY"/*.conf; do
         *)           GREP_FLAGS=-E  ;;
     esac
 
-    # Pipeline notes:
-    #   * find -type f: FILTER selects among files (a directory has no
-    #     content to hash);
-    #   * tr + xargs -0 keep paths with spaces intact;
-    #   * each worker sources helpers.sh (argument 1) and emits the PH
-    #     line of one file (argument 2).  Each line is one short write,
-    #     hence atomic even with parallel workers.  A file vanishing
-    #     between find and hash is simply dropped from the snapshot.
+    # scan.sh takes its parameters from the environment so that the su
+    # command string inside run_as stays constant (see helpers.sh).
+    NEL_MEDIA_WATCH_SCAN_TARGET="$TARGET_DIRECTORY"
+    NEL_MEDIA_WATCH_SCAN_FILTER="$FILTER"
+    NEL_MEDIA_WATCH_SCAN_GREP_FLAGS="$GREP_FLAGS"
+    export NEL_MEDIA_WATCH_SCAN_TARGET NEL_MEDIA_WATCH_SCAN_FILTER NEL_MEDIA_WATCH_SCAN_GREP_FLAGS
+
+    # Target PH files are named "ph.<target>": the PH file stays owned
+    # by root (the redirection happens here), only the scan runs as
+    # RUN_AS.  The scan validates the target directory itself, with the
+    # identity that actually reads it; on failure the PH file is removed
+    # so phase 3 skips this target instead of emptying its registry.
     TARGET_PH_FILE="$WORK_DIRECTORY/ph.$TARGET_NAME"
 
-    find "$TARGET_DIRECTORY" -type f \
-        | LC_ALL=C grep $GREP_FLAGS -- "$FILTER" \
-        | tr '\n' '\0' \
-        | xargs -0 -n 1 -P "$NEL_MEDIA_WATCH_JOBS" \
-            sh -c '. "$1" || exit 1; ph_line "$2" || exit 0' \
-            ph-worker "$SELF_DIRECTORY/helpers.sh" \
-        > "$TARGET_PH_FILE"
-
-    cat "$TARGET_PH_FILE" >> "$GENERAL_PH_FILE"
+    if ! run_as "$RUN_AS" "$SELF_DIRECTORY/scan.sh" > "$TARGET_PH_FILE"; then
+        rm -f "$TARGET_PH_FILE"
+        watch_log "Target '$TARGET_NAME': scan as '$RUN_AS' failed, target skipped"
+        continue
+    fi
 done
 
-# --- 3. General pass: analyse and cache every new content ---------------------------
-# De-duplicated by hash (the first 32 characters) so the same content,
-# present under several paths, is analysed once.  After this batch every
-# hash of the snapshot has a cache entry: step 4 finds only cache hits.
-
-if [ -s "$GENERAL_PH_FILE" ]; then
-    awk '!seen[substr($0, 1, 32)]++' "$GENERAL_PH_FILE" \
-        | "$SELF_DIRECTORY/exec_check.sh" > /dev/null
-fi
-
-# --- 4. Per-target registries --------------------------------------------------------
+# --- 3. Per target: analyse new content, then build the registry -----------------
 
 for LOCAL_CONF in "$CONF_D_DIRECTORY"/*.conf; do
     [ -e "$LOCAL_CONF" ] || continue
@@ -168,14 +159,31 @@ for LOCAL_CONF in "$CONF_D_DIRECTORY"/*.conf; do
     # No PH file = target skipped during the snapshot.
     [ -f "$TARGET_PH_FILE" ] || continue
 
-    TARGET_DIRECTORY=; FILTER=; CASE=; REGISTRY=
+    TARGET_DIRECTORY=; FILTER=; CASE=; REGISTRY=; RUN_AS=
     . "$LOCAL_CONF"
+    [ -n "$RUN_AS" ] || RUN_AS=root
 
+    # check_media_state_c.sh runs the analyzer as this user (reads the
+    # media), while itself staying root (writes the cache).
+    NEL_MEDIA_WATCH_RUN_AS="$RUN_AS"
+    export NEL_MEDIA_WATCH_RUN_AS
+
+    # Analyse and cache every content of this target never seen before.
+    # De-duplicated by hash (the first 32 characters) so the same
+    # content, present under several paths, is not analysed twice
+    # concurrently.  After this batch every hash of the target has a
+    # cache entry: the registry pass below finds only cache hits.
+    if [ -s "$TARGET_PH_FILE" ]; then
+        awk '!seen[substr($0, 1, 32)]++' "$TARGET_PH_FILE" \
+            | "$SELF_DIRECTORY/exec_check.sh" > /dev/null
+    fi
+
+    # Registry written as root, no matter what RUN_AS says.
     "$SELF_DIRECTORY/exec_dir.sh" "$TARGET_DIRECTORY" "$REGISTRY" < "$TARGET_PH_FILE" \
         || watch_log "Target '$TARGET_NAME': registry build failed"
 done
 
-# --- 5. Duration: <H>h<MM>'<SS>'' (hours unpadded, minutes/seconds two digits) -------
+# --- 4. Duration: <H>h<MM>'<SS>'' (hours unpadded, minutes/seconds two digits) -------
 
 ELAPSED=$(($(date +%s) - START_EPOCH))
 watch_log "$(printf "Execution finished in %dh%02d'%02d''" \

@@ -58,7 +58,13 @@ fi
 # --- Cache MISS: analyse, then publish the entry ---------------------------------
 
 # The analyzer prints one line: STATE <TAB> INTEGRITY <TAB> REASON.
-ANALYSIS=$("$SELF_DIRECTORY/check_media_state.sh" "$PH_PATH") || exit 1
+#
+# It runs as the target's RUN_AS user (exported by exec.sh): on NFS
+# targets root is squashed to nobody and could not read the file.  This
+# script itself stays root, because the CACHE IS ALWAYS WRITTEN AS ROOT,
+# no matter what RUN_AS says.
+ANALYSIS=$(run_as "${NEL_MEDIA_WATCH_RUN_AS:-root}" \
+    "$SELF_DIRECTORY/check_media_state.sh" "$PH_PATH") || exit 1
 
 TAB=$(printf '\t')
 STATE=${ANALYSIS%%"$TAB"*}

@@ -15,8 +15,9 @@ dependencies beyond `ffmpeg`/`ffprobe`, `xxh128sum` (package `xxhash`),
 
 | File | Role |
 |------|------|
-| `libexec/exec.sh` | Orchestrator, cron entry point. Takes the global `lockf` lock, snapshots the file lists (find + grep + xxh128), runs the general analysis batch, then builds every registry. |
-| `libexec/exec_check.sh` | Reads PH lines (`HASH/absolute/path`) from stdin and runs the cached check on each — the single cross-target batch that fills the cache. |
+| `libexec/exec.sh` | Orchestrator, cron entry point. Takes the global `lockf` lock, snapshots every target via `scan.sh`, then per target runs the analysis batch and builds the registry. |
+| `libexec/scan.sh` | Lists and hashes the files of one target (PH lines on stdout). Runs as the target's `RUN_AS` user via `su -m`, so NFS targets with root squash are read with the right identity. |
+| `libexec/exec_check.sh` | Reads PH lines (`HASH/absolute/path`) from stdin and runs the cached check on each — the batch that fills the cache, run once per target. |
 | `libexec/exec_dir.sh` | Builds the registry of one target from its PH lines on stdin (all cache hits at that point). Sorted `LC_ALL=C`, rewritten only if the content changed, always atomically. |
 | `libexec/check_media_state_c.sh` | Cached state of one file: cache hit → read; cache miss → full analysis + immutable, atomically-created cache entry (state, integrity, reason) + syslog "New fingerprint" line. |
 | `libexec/check_media_state.sh` | The real analysis of one file: ffprobe pre-check, full software decode (`-f null -`), duration-coverage check, classification. Prints `STATE<TAB>INTEGRITY<TAB>REASON`. No cache knowledge. |
@@ -33,17 +34,20 @@ dependencies beyond `ffmpeg`/`ffprobe`, `xxh128sum` (package `xxhash`),
    power loss: no stale-lock cleanup exists because none is needed.
 2. The global configuration provides `CACHE_DIRECTORY`; every `*.conf` in
    `conf.d/` describes one target (`TARGET_DIRECTORY`, `FILTER`, `CASE`,
-   `REGISTRY`).
-3. **Snapshot**: per target, `find -type f | grep -E[i] FILTER`, then each
-   file is hashed with `xxh128sum`, producing one PH file per target plus a
-   general one. Lists and hashes are frozen here for the whole run.
-4. **General pass**: the general PH file, de-duplicated by hash, goes
-   through `exec_check.sh`. New content is analysed and cached; known
-   content is untouched.
-5. **Registries**: per target, `exec_dir.sh` reads states (all from cache)
-   and writes `relative_path<TAB>STATE<TAB>xxh128`, sorted, one line per
-   file, replacing the registry only if it actually changed.
-6. `Execution finished in <H>h<MM>'<SS>''` is logged.
+   `REGISTRY`, `RUN_AS`).
+3. **Snapshot**: per target, `scan.sh` runs `find -type f | grep -E[i]
+   FILTER` and hashes every file with `xxh128sum`, producing one PH file
+   per target. The scan runs as the target's `RUN_AS` user (`su -m`, no
+   sudo involved): on NFS targets root is squashed to nobody and could
+   not read the files. Lists and hashes are frozen here for the whole run.
+4. **Per target**: its PH lines, de-duplicated by hash, go through
+   `exec_check.sh` — content never seen before is analysed (as `RUN_AS`)
+   and cached — then `exec_dir.sh` builds the registry from the cache:
+   `relative_path<TAB>STATE<TAB>xxh128`, sorted, one line per file,
+   replaced only when its content actually changed. Cache entries and
+   registries are always written as root. Content shared across targets
+   is analysed only once.
+5. `Execution finished in <H>h<MM>'<SS>''` is logged.
 
 ## Cache layout
 
@@ -71,7 +75,7 @@ REASON="3 decoder error line(s)"
 The original specification prescribed a strictly sequential chain. **By
 explicit project decision the number of parallel workers is one less than
 the available cores** (`hw.ncpu - 1`, minimum 1). The parallel stages are
-the snapshot hashing and the general analysis batch; each ffmpeg decode is
+the snapshot hashing and the analysis batches; each ffmpeg decode is
 single-threaded, so the total CPU footprint stays at *cores − 1* and one
 core is always left free for the other services (e.g. Nextcloud) on the
 machine. Override with `NEL_MEDIA_WATCH_JOBS` if needed.
@@ -84,6 +88,22 @@ files are sourced one at a time by `exec.sh` — the include loop in the
 global file had no consumer and only leaked the last target's variables
 into whoever sourced it. The operational property is unchanged: adding or
 removing a target is still just creating or deleting a file in `conf.d/`.
+
+## Per-target identity (deliberate deviation)
+
+Specification §7.4 prescribed one single cross-target "general" batch.
+Each target can now name a `RUN_AS` user, and everything that READS the
+media — the scan and the ffprobe/ffmpeg analysis — runs as that user via
+`su -m` (sudo is not installed; root needs no password to su, and `-m`
+makes users without a login shell work too). A single cross-target batch
+is incompatible with per-target identities, so the analysis batch runs
+once per target, right before that target's registry. The guarantees are
+unchanged: the snapshot is still taken up front for all targets, content
+shared across targets is analysed only once (the first batch caches it,
+the later ones hit the cache), and **cache entries and registries are
+always written as root**, whatever `RUN_AS` says. `make config` and
+`make reconfig` validate `TARGET_DIRECTORY` with the `RUN_AS` identity
+for the same reason.
 
 ## Classification (per file)
 
