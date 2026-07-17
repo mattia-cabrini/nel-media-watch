@@ -5,6 +5,13 @@
 # ---------------------------------------------------------------------------
 # exec.sh -- orchestrator and cron entry point of nel-media-watch.
 #
+# Usage:   exec.sh [target-name]
+#
+# Without argument every target in conf.d/ is processed (the daily cron
+# mode).  With an argument only conf.d/<target-name>.conf is processed:
+# 'make run' uses this for manual, detached single-target runs.  Both
+# modes take the SAME global lock, so runs can never overlap.
+#
 # Flow of a run:
 #   0. take the global lock (lockf); if busy, log and leave at once;
 #   1. load the global configuration (CACHE_DIRECTORY);
@@ -100,6 +107,13 @@ mkdir -p "$CACHE_DIRECTORY" || exit 1
 # The local configurations live in conf.d/ next to the global file.
 CONF_D_DIRECTORY=$(dirname -- "$NEL_MEDIA_WATCH_CONF")/conf.d
 
+# Optional single-target mode (see Usage above).
+ONLY_TARGET="${1:-}"
+if [ -n "$ONLY_TARGET" ] && [ ! -f "$CONF_D_DIRECTORY/$ONLY_TARGET.conf" ]; then
+    watch_log "Unknown target '$ONLY_TARGET': aborting"
+    exit 1
+fi
+
 # Parallel workers = available cores - 1, never below 1.
 CPU_COUNT=$(sysctl -n hw.ncpu 2>/dev/null || echo 2)
 NEL_MEDIA_WATCH_JOBS="${NEL_MEDIA_WATCH_JOBS:-$((CPU_COUNT - 1))}"
@@ -115,6 +129,10 @@ trap 'rm -rf "$WORK_DIRECTORY"' EXIT
 for LOCAL_CONF in "$CONF_D_DIRECTORY"/*.conf; do
     [ -e "$LOCAL_CONF" ] || continue
     TARGET_NAME=$(basename -- "$LOCAL_CONF" .conf)
+
+    # In single-target mode every other configuration is skipped (and
+    # phase 3 skips them too, since they get no PH file here).
+    [ -z "$ONLY_TARGET" ] || [ "$TARGET_NAME" = "$ONLY_TARGET" ] || continue
 
     # Reset, then source: values cannot leak between targets.  RUN_AS
     # defaults to root for configurations written before it existed.

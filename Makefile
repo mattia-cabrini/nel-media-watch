@@ -15,7 +15,7 @@
 
 PREFIX ?= /usr/local
 
-.PHONY: help install config unconfig reconfig uninstall
+.PHONY: help install config unconfig reconfig run uninstall
 
 help:
 	@echo "nel-media-watch -- periodic video integrity surveillance"
@@ -27,6 +27,8 @@ help:
 	@echo "  make unconfig   list the target configurations and delete one by index"
 	@echo "                  (the file is kept as a timestamped .conf.bak backup)"
 	@echo "  make reconfig   edit a target configuration ('no change on empty')"
+	@echo "  make run        launch a detached run of one target configuration, via"
+	@echo "                  daemon(8): it completes even if this shell terminates"
 	@echo "  make uninstall  back up the crontab, then remove the cron entry and the"
 	@echo "                  scripts (configs/cache/registries kept)"
 	@echo ""
@@ -43,6 +45,9 @@ unconfig:
 
 reconfig:
 	@PREFIX="$(PREFIX)" sh setup/reconfig.sh
+
+run:
+	@PREFIX="$(PREFIX)" sh setup/run.sh
 
 uninstall:
 	@PREFIX="$(PREFIX)" sh setup/uninstall.sh

@@ -22,7 +22,7 @@ dependencies beyond `ffmpeg`/`ffprobe`, `xxh128sum` (package `xxhash`),
 | `libexec/check_media_state_c.sh` | Cached state of one file: cache hit → read; cache miss → full analysis + immutable, atomically-created cache entry (state, integrity, reason) + syslog "New fingerprint" line. |
 | `libexec/check_media_state.sh` | The real analysis of one file: ffprobe pre-check, full software decode (`-f null -`), duration-coverage check, classification. Prints `STATE<TAB>INTEGRITY<TAB>REASON`. No cache knowledge. |
 | `libexec/helpers.sh` | Shared runtime helpers (sourced): file hashing, PH line building/parsing, hash → sharded cache path, configuration loading, atomic file publication, syslog logging. |
-| `setup/*.sh` | Interactive installation/management scripts (`install`, `config`, `unconfig`, `reconfig`, `uninstall`); the shared prompts, validations and paths live in `setup/common.sh`. |
+| `setup/*.sh` | Interactive installation/management scripts (`install`, `config`, `unconfig`, `reconfig`, `run`, `uninstall`); the shared prompts, validations and paths live in `setup/common.sh`. |
 | `Makefile` | Thin dispatcher: each target runs the matching `setup/` script, forwarding `PREFIX`. |
 | `nel-media-watch.conf.default` | Default global configuration installed to `/usr/local/etc/nel-media-watch/nel-media-watch.conf`. |
 
@@ -135,6 +135,7 @@ make install    # as root: scripts, global config, cache dir, crontab entry
 make config     # add a target (name, directory, filter, case menu, registry)
 make unconfig   # delete a target by numeric index
 make reconfig   # edit a target by index, "no change on empty"
+make run        # detached daemon(8) run of one target; survives shell exit
 make uninstall  # remove crontab entry + scripts (configs/cache/registries kept)
 ```
 
