@@ -4,14 +4,31 @@
 # ---------------------------------------------------------------------------
 # nel-media-watch -- GLOBAL configuration.
 #
-# Plain POSIX shell, sourced ('.') by the scripts.
+# Shell-assignment syntax, KEY=value with the value bare or quoted:
+# sourced ('.') by the setup scripts, parsed by the program.  One
+# assignment per line, comments and blank lines; nothing else is
+# understood (no 'export', no expansions).
 #
 # The local (per-target) configurations are NOT included here: they live
 # as individual '*.conf' files in the conf.d/ directory next to this
-# file, and exec.sh sources them one at a time.  Adding a target =
+# file, and the program reads them one at a time.  Adding a target =
 # creating a file there; removing it = deleting that file.
 # ---------------------------------------------------------------------------
 
 # Absolute path of the directory holding the result cache (one file per
 # xxh128 content hash, sharded over 10 directory levels).
 CACHE_DIRECTORY="/var/db/nel-media-watch/cache"
+
+# Duty cycle, to keep the disks' temperature under control.  Once
+# TIME_UP seconds have passed since work resumed, the whole program
+# pauses for TIME_PAUSE seconds (each pause is logged via syslog).  The
+# check happens between files, so a file in flight is never
+# interrupted, and the pause starts only once every worker has stopped.
+# Its length is proportional to the processing that earned it:
+# TIME_PAUSE * processing / TIME_UP, where the processing is the time
+# since the previous pause ended, measured once everything has stopped
+# -- about TIME_PAUSE normally, three times that when a single file kept
+# a disk busy for three times TIME_UP.  Plain integers, in seconds; 0
+# in either one disables the duty cycle.  'make install' asks for both.
+TIME_UP=0
+TIME_PAUSE=0

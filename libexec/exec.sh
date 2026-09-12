@@ -14,7 +14,8 @@
 #
 # Flow of a run:
 #   0. take the global lock (lockf); if busy, log and leave at once;
-#   1. load the global configuration (CACHE_DIRECTORY);
+#   1. load the global configuration (CACHE_DIRECTORY, TIME_UP and
+#      TIME_PAUSE) and reset the duty cycle;
 #   2. SNAPSHOT: per target, scan.sh lists and hashes the files
 #      (find | grep FILTER | xxh128sum) into one "PH" file per target.
 #      Lists and hashes are crystallised here and used unchanged for
@@ -42,6 +43,14 @@
 # specification.  Each ffmpeg decode is single-threaded (see
 # check_media_state.sh), so one core is always left free for the other
 # services on the machine.
+#
+# Duty cycle (disk temperature): TIME_UP/TIME_PAUSE from the global
+# configuration pace both heavy stages.  Every worker passes a
+# checkpoint after each file it hashes or analyses (duty_cycle in
+# helpers.sh); they all share one state file, $NEL_MEDIA_WATCH_DUTY,
+# reset here at the start of every run.  The scan workers write it as
+# the target's RUN_AS user, so the file is handed to that user for each
+# scan (root, analysing in phase 3, writes it regardless).
 #
 # Paths are assumed not to contain newlines (the scan is line-oriented).
 #
@@ -91,7 +100,7 @@ if [ ! -r "$NEL_MEDIA_WATCH_CONF" ]; then
     exit 1
 fi
 
-CACHE_DIRECTORY=
+CACHE_DIRECTORY=; TIME_UP=; TIME_PAUSE=
 . "$NEL_MEDIA_WATCH_CONF"
 
 # An empty CACHE_DIRECTORY would shard cache entries under '/': refuse.
@@ -103,6 +112,40 @@ fi
 # Children read the cache location from the environment.
 export CACHE_DIRECTORY
 mkdir -p "$CACHE_DIRECTORY" || exit 1
+
+# Duty cycle (see duty_cycle in helpers.sh).  A missing value disables
+# it (configurations written before it existed); a malformed one aborts
+# the run, since running unthrottled would defeat its purpose.
+TIME_UP="${TIME_UP:-0}"
+TIME_PAUSE="${TIME_PAUSE:-0}"
+if ! is_seconds "$TIME_UP" || ! is_seconds "$TIME_PAUSE"; then
+    watch_log "TIME_UP/TIME_PAUSE in '$NEL_MEDIA_WATCH_CONF' are not plain integers: aborting"
+    exit 1
+fi
+
+# The first work window starts with the run.  Only then are the values
+# handed to the workers, under their own names: sourcing the global
+# configuration outside a run must not enable the duty cycle.  The run
+# epoch travels with them -- it is the lower bound below which a state
+# is refused as implausible (see duty_cycle in helpers.sh).
+if ! printf '%s\n' "$START_EPOCH" > "$NEL_MEDIA_WATCH_DUTY"; then
+    watch_log "Duty cycle state '$NEL_MEDIA_WATCH_DUTY' not writable: aborting"
+    exit 1
+fi
+
+# Workers mark themselves in flight here while they read media, so that
+# a pause can wait for the last of them (see duty_park in helpers.sh).
+# Marks left behind by the previous run are cleared: one of them could
+# name a PID that has since been reused, and would hold pauses open.
+if ! mkdir -p "$NEL_MEDIA_WATCH_DUTY_WORKERS"; then
+    watch_log "Duty cycle marks '$NEL_MEDIA_WATCH_DUTY_WORKERS' not writable: aborting"
+    exit 1
+fi
+rm -f "$NEL_MEDIA_WATCH_DUTY_WORKERS"/* 2>/dev/null
+NEL_MEDIA_WATCH_TIME_UP="$TIME_UP"
+NEL_MEDIA_WATCH_TIME_PAUSE="$TIME_PAUSE"
+NEL_MEDIA_WATCH_START="$START_EPOCH"
+export NEL_MEDIA_WATCH_TIME_UP NEL_MEDIA_WATCH_TIME_PAUSE NEL_MEDIA_WATCH_START
 
 # The local configurations live in conf.d/ next to the global file.
 CONF_D_DIRECTORY=$(dirname -- "$NEL_MEDIA_WATCH_CONF")/conf.d
@@ -152,6 +195,17 @@ for LOCAL_CONF in "$CONF_D_DIRECTORY"/*.conf; do
     NEL_MEDIA_WATCH_SCAN_FILTER="$FILTER"
     NEL_MEDIA_WATCH_SCAN_GREP_FLAGS="$GREP_FLAGS"
     export NEL_MEDIA_WATCH_SCAN_TARGET NEL_MEDIA_WATCH_SCAN_FILTER NEL_MEDIA_WATCH_SCAN_GREP_FLAGS
+
+    # The scan workers update the duty cycle state, and mark themselves
+    # in flight, as RUN_AS: hand both over to that user for this scan.
+    # Failing that they could take no pause, and the whole target would
+    # be hashed unthrottled: skip it, exactly as a failed scan is
+    # skipped.
+    if [ "$TIME_UP" -gt 0 ] && [ "$TIME_PAUSE" -gt 0 ] \
+        && ! chown "$RUN_AS" "$NEL_MEDIA_WATCH_DUTY" "$NEL_MEDIA_WATCH_DUTY_WORKERS"; then
+        watch_log "Target '$TARGET_NAME': duty cycle state not handed to '$RUN_AS', target skipped"
+        continue
+    fi
 
     # Target PH files are named "ph.<target>": the PH file stays owned
     # by root (the redirection happens here), only the scan runs as

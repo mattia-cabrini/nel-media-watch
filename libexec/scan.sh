@@ -17,6 +17,9 @@
 #     NEL_MEDIA_WATCH_SCAN_FILTER      extended regex selecting the files
 #     NEL_MEDIA_WATCH_SCAN_GREP_FLAGS  -E (sensitive) or -Ei (insensitive)
 #     NEL_MEDIA_WATCH_JOBS             parallel hashing workers
+#     NEL_MEDIA_WATCH_TIME_UP          duty cycle, TIME_UP/TIME_PAUSE of
+#     NEL_MEDIA_WATCH_TIME_PAUSE       the global configuration (see
+#                                      duty_cycle in helpers.sh)
 #
 # Stdout: one PH line per file ("HASH/absolute/path", see helpers.sh).
 #
@@ -54,10 +57,15 @@ fi
 #   * each worker sources helpers.sh (argument 1) and emits the PH line
 #     of one file (argument 2).  Each line is one short write, hence
 #     atomic even with parallel workers.  A file vanishing between find
-#     and hash is simply dropped from the snapshot.
+#     and hash is simply dropped from the snapshot;
+#   * after each file the worker passes the duty cycle checkpoint, which
+#     may make it sleep: its xargs slot takes no new file meanwhile.
+#     The epoch taken before the hash goes with it, so that a pause is
+#     stretched by the time THIS file took and by nothing else.
 find "$TARGET" -type f \
     | LC_ALL=C grep $GREP_FLAGS -- "$FILTER" \
     | tr '\n' '\0' \
     | xargs -0 -n 1 -P "$JOBS" \
-        sh -c '. "$1" || exit 1; ph_line "$2" || exit 0' \
+        sh -c '. "$1" || exit 1; started=$(date +%s); duty_working
+               ph_line "$2"; duty_cycle "$started"; exit 0' \
         ph-worker "$SELF_DIRECTORY/helpers.sh"

@@ -14,10 +14,14 @@
 # once, upstream, by exec.sh: this script never re-hashes anything.
 #
 # Cache HIT  -> read STATE from the entry, print it, done (no analysis).
+#               An entry that yields no state (emptied or half-written
+#               by a power loss) is treated as a miss and replaced.
 # Cache MISS -> analyse, create the cache entry atomically, log the new
-#               fingerprint via syslog, print the state.
+#               fingerprint via syslog, pass the duty cycle checkpoint
+#               (see helpers.sh; it may sleep), print the state.
 #
-# A cache entry is an IMMUTABLE sourceable snippet:
+# A cache entry is a sourceable snippet, never rewritten once it holds a
+# state (an unusable one is replaced):
 #
 #     STATE="OK|Degraded|Corrupted"
 #     INTEGRITY="<percentage of the declared duration actually decoded>"
@@ -49,13 +53,29 @@ CACHE_FILE=$(shard_path "$PH_HASH") || exit 1
 
 # --- Cache HIT: the entry is a sourceable snippet that sets STATE ----------------
 
+# Sourced in a SUBSHELL on purpose: an entry left empty -- or filled
+# with unparsable bytes -- by a power loss (the rename is atomic, its
+# content is not fsync'd) would otherwise abort this script under
+# 'set -u', or kill it with a syntax error, and that file would stay out
+# of the registry for ever.  No state means no usable entry: fall
+# through to the analysis below, which replaces it.
 if [ -f "$CACHE_FILE" ]; then
-    . "$CACHE_FILE"
-    printf '%s\n' "$STATE"
-    exit 0
+    STATE=$(. "$CACHE_FILE" 2>/dev/null; printf '%s' "${STATE:-}")
+    if [ -n "$STATE" ]; then
+        printf '%s\n' "$STATE"
+        exit 0
+    fi
+    watch_log "Unusable cache entry for xxh128 $PH_HASH: re-analysing"
 fi
 
 # --- Cache MISS: analyse, then publish the entry ---------------------------------
+
+# The epoch before the decode goes to the duty cycle checkpoint below,
+# which stretches a pause by the time THIS file took; the mark left by
+# duty_working keeps a pause opened meanwhile from ending while this
+# decode is still reading the disk (see helpers.sh).
+UNIT_STARTED=$(date +%s)
+duty_working
 
 # The analyzer prints one line: STATE <TAB> INTEGRITY <TAB> REASON.
 #
@@ -89,6 +109,10 @@ publish_file "$TEMPORARY" "$CACHE_FILE" || exit 1
 # DEGRADED/CORRUPTED content (no separate alert, it would be redundant).
 STATE_UPPER=$(printf '%s' "$STATE" | tr '[:lower:]' '[:upper:]')
 watch_log "New fingerprint in watch's cache for xxh128 $PH_HASH. State is $STATE_UPPER"
+
+# A full decode is exactly the sustained disk read the duty cycle paces;
+# a cache hit reads no media, so it has no checkpoint.
+duty_cycle "$UNIT_STARTED"
 
 printf '%s\n' "$STATE"
 exit 0

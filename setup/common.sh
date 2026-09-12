@@ -22,7 +22,49 @@ ETC_DIRECTORY="$PREFIX/etc/nel-media-watch"
 CONF_D_DIRECTORY="$ETC_DIRECTORY/conf.d"
 GLOBAL_CONF="$ETC_DIRECTORY/nel-media-watch.conf"
 
-RUNTIME_SCRIPTS="helpers.sh scan.sh exec.sh exec_check.sh exec_dir.sh check_media_state.sh check_media_state_c.sh"
+# The runtime is one Go binary: 'make build' puts it in bin/ of the
+# repository, 'make install' copies it under $LIBEXEC_DIRECTORY.
+RUNTIME_BINARY="nel-media-watch"
+BUILT_BINARY="bin/$RUNTIME_BINARY"
+INSTALLED_BINARY="$LIBEXEC_DIRECTORY/$RUNTIME_BINARY"
+
+# The repository root, where BUILT_BINARY is relative to.  This file is
+# sourced, so $0 is still the script under setup/ that sourced it.
+SOURCE_DIRECTORY=$(cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
+
+# The runtime's global lock: an flock(2) on this file is what keeps two
+# runs from overlapping, and what a setup script takes when it must not
+# overlap a run either (see hold_run_lock).  Same default, and same
+# environment override, as the binary.
+LOCK_FILE="${NEL_MEDIA_WATCH_LOCK:-/var/run/nel-media-watch.lock}"
+
+# --- Run lock ------------------------------------------------------------
+
+# hold_run_lock: run the rest of the calling script under the runtime's
+# lock.  A run in progress -- of this version or of the shell one it
+# replaced, which locked the very same file -- makes the script refuse
+# to start; while the script runs, prompts included, no run can start:
+# cron finds the lock busy and logs its usual abort.
+#
+# On first entry the script re-executes itself under lockf(1), whose
+# flock is the one the binary takes; the child sees the marker variable
+# and simply goes on.  '-t 0' = do not wait; '-s' = no message from
+# lockf, ours is clearer; '-k' keeps the lock file, since unlinking it
+# would let the runtime lock a fresh inode while we still hold the old
+# one.  The environment (PREFIX, the marker) travels to the child, and
+# so does stdin, so the prompts work as before.
+hold_run_lock() {
+    [ -z "${NEL_MEDIA_WATCH_SETUP_LOCKED:-}" ] || return 0
+    NEL_MEDIA_WATCH_SETUP_LOCKED=1
+    export NEL_MEDIA_WATCH_SETUP_LOCKED
+
+    lockf -t 0 -s -k "$LOCK_FILE" sh "$0"
+    _status=$?
+    if [ "$_status" -eq 75 ]; then
+        echo "ERROR: a run of nel-media-watch is in progress: retry once it has finished" >&2
+    fi
+    exit "$_status"
+}
 
 # timestamp: print the current time as {yyyymmdd}h{HHMMSS}; used to name
 # backup files.
@@ -70,8 +112,9 @@ select_configuration() {
 # will actually scan the target.  Needed for NFS targets where root is
 # squashed to nobody: root may not even see a directory that the RUN_AS
 # user can.  The path travels through the environment so the su command
-# string stays constant (same technique as run_as in libexec/helpers.sh;
-# sudo is not installed on the host).
+# string stays constant and nothing is ever quoted into it (sudo is not
+# installed on the host; the runtime itself needs no su at all, it
+# starts its readers with the user's credentials directly).
 directory_exists_as() {
     if [ "$1" = "root" ]; then
         [ -d "$2" ]
